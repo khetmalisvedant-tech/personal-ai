@@ -1,7 +1,7 @@
 import os
 from openai import OpenAI
 
-class LLMEngine:
+class Engine:
     def __init__(self, model="gpt-3.5-turbo", temperature=0.7):
         self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self.model = model

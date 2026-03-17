@@ -1,28 +1,10 @@
-import json
-import os
+# memory.py — session-safe version
+from collections import defaultdict
 
-MEMORY_FILE = "memory.json"
+_histories: dict = defaultdict(list)
 
-class Memory:
-    def __init__(self):
-        self.history = self.load()
+def add_message(session_id: str, role: str, content: str):
+    _histories[session_id].append({"role": role, "content": content})
 
-    def load(self):
-        if os.path.exists(MEMORY_FILE):
-            with open(MEMORY_FILE, "r") as f:
-                return json.load(f)
-        return []
-
-    def save(self):
-        with open(MEMORY_FILE, "w") as f:
-            json.dump(self.history, f)
-
-    def add(self, role, content):
-        self.history.append({"role": role, "content": content})
-        self.save()
-
-    def format_for_prompt(self):
-        formatted = ""
-        for msg in self.history:
-            formatted += f"{msg['role'].capitalize()}: {msg['content']}\n"
-        return formatted
+def get_history(session_id: str):
+    return _histories[session_id][-6:]

@@ -1,35 +1,19 @@
-from fastapi import FastAPI
-from main import router
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import APIRouter
+from pydantic import BaseModel
+from core import process_query
+
+router = APIRouter()
 
 
-app = FastAPI()
-app.include_router(router)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(router)
-
-def run_cli():
-    print("🔥 Personal AI Agent Started")
-    print("Type exit to quit\n")
-
-    from engine import AIEngine
-    engine = AIEngine()
-
-    while True:
-        command = input(">>> ")
-
-        if command.lower() == "exit":
-            break
-
-        response = engine.chat(command)
-        print(response)
+class QuestionRequest(BaseModel):
+    question: str
 
 
-if __name__ == "__main__":
-    run_cli()
+@router.post("/ask")
+async def ask(data: QuestionRequest):
+    question = data.question.strip()
+
+    if not question:
+        return {"error": "No question provided"}
+
+    return process_query(question)

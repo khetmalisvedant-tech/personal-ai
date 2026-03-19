@@ -1,145 +1,151 @@
+import re
 import requests
 import json
 from memory import get_history
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
+MODEL      = "llama3.2"
+
+MARATHI_KEYWORDS = {
+    "आहे","आणि","काय","कसे","मला","तुम्ही","आपण",
+    "सांगा","करा","हे","ते","नाही","होय","मराठी",
+    "त्याचा","त्याची","आम्ही","तुमचा","कोण","कुठे"
+}
+HINDI_KEYWORDS = {
+    "है","और","क्या","कैसे","मुझे","आप","हम",
+    "बताओ","करो","यह","वह","नहीं","हाँ","हिंदी",
+    "उसका","उसकी","तुम्हारा","कौन","कहाँ","मैं"
+}
 
 
-def detect_language(text: str):
-    """
-    Detects language from input text.
-    Returns: 'hindi', 'marathi', or 'english'
-
-    Since both Hindi and Marathi share Devanagari script,
-    we use keyword heuristics to distinguish them.
-    """
-    marathi_keywords = [
-        "आहे", "आणि", "काय", "कसे", "मला", "तुम्ही", "आपण",
-        "सांगा", "करा", "हे", "ते", "नाही", "होय", "मराठी",
-        "त्याचा", "त्याची", "आम्ही", "तुमचा", "कोण", "कुठे"
-    ]
-
-    hindi_keywords = [
-        "है", "और", "क्या", "कैसे", "मुझे", "आप", "हम",
-        "बताओ", "करो", "यह", "वह", "नहीं", "हाँ", "हिंदी",
-        "उसका", "उसकी", "तुम्हारा", "कौन", "कहाँ", "मैं"
-    ]
-
-    has_devanagari = False
-    for ch in text:
-        if "\u0900" <= ch <= "\u097F":
-            has_devanagari = True
-            break
-
+def detect_language(text: str) -> str:
+    has_devanagari = any("\u0900" <= ch <= "\u097F" for ch in text)
     if not has_devanagari:
         return "english"
-
-    for word in marathi_keywords:
-        if word in text:
-            return "marathi"
-
-    for word in hindi_keywords:
-        if word in text:
-            return "hindi"
-
-    # Default fallback for unrecognised Devanagari: Hindi
+    words = set(text.split())
+    if words & MARATHI_KEYWORDS:
+        return "marathi"
+    if words & HINDI_KEYWORDS:
+        return "hindi"
     return "hindi"
 
 
-def generate_tutor_response(user_input: str):
-    history = get_history()
+def _call(prompt: str, max_tokens: int = 300, temperature: float = 0.3) -> str:
+    resp = requests.post(
+        OLLAMA_URL,
+        json={
+            "model":   MODEL,
+            "prompt":  prompt,
+            "stream":  False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+                "stop": ["\n\n\n"],
+            },
+        },
+        timeout=90,
+    )
+    resp.raise_for_status()
+    return resp.json().get("response", "").strip()
 
-    history_text = ""
-    for msg in history:
-        history_text += f"{msg['role']}: {msg['content']}\n"
 
+def _make_summary(explanation: str) -> str:
+    sentences = re.split(r'(?<=[.!?])\s+', explanation.strip())
+    return sentences[0] if sentences else explanation[:120]
+
+
+def _make_quiz(user_input: str, explanation: str, lang: str) -> list:
+    lang_rule = {
+        "marathi": "Reply ONLY in Marathi.",
+        "hindi":   "Reply ONLY in Hindi.",
+        "english": "Reply ONLY in English.",
+    }[lang]
+
+    prompt = (
+        f"{lang_rule}\n"
+        f"Topic: {user_input}\n"
+        f"Context: {explanation[:200]}\n\n"
+        f"Write exactly 3 short quiz questions about this topic. "
+        f"Number them 1. 2. 3. One per line. Questions only, no answers."
+    )
+    try:
+        raw   = _call(prompt, max_tokens=150, temperature=0.4)
+        lines = [l.strip() for l in raw.split("\n") if l.strip()]
+        return [re.sub(r"^\d+[\.\)]\s*", "", l) for l in lines][:3]
+    except Exception:
+        return []
+
+
+def generate_tutor_response(user_input: str, session_id: str = "default") -> dict:
     lang = detect_language(user_input)
 
-    # Explicit, unambiguous language instruction for LLaMA3
-    if lang == "marathi":
-        language_instruction = (
-            "STRICT RULE: You MUST respond ONLY in Marathi language. "
-            "Do NOT use Hindi. Do NOT use English. "
-            "Every word in explanation, summary, and quiz must be in Marathi."
-        )
-    elif lang == "hindi":
-        language_instruction = (
-            "STRICT RULE: You MUST respond ONLY in Hindi language. "
-            "Do NOT use Marathi. Do NOT use English. "
-            "Every word in explanation, summary, and quiz must be in Hindi."
-        )
-    else:
-        language_instruction = (
-            "STRICT RULE: You MUST respond ONLY in English language. "
-            "Do NOT use Hindi or Marathi. "
-            "Every word in explanation, summary, and quiz must be in English."
-        )
+    history      = get_history(session_id)[-4:]
+    history_text = "".join(f"{m['role']}: {m['content']}\n" for m in history)
 
-    prompt = f"""You are a helpful AI tutor for students.
+    lang_rule = {
+        "marathi": "Reply ONLY in Marathi. Do not use Hindi or English.",
+        "hindi":   "Reply ONLY in Hindi. Do not use Marathi or English.",
+        "english": "Reply ONLY in English. Do not use Hindi or Marathi.",
+    }[lang]
 
-Conversation so far:
-{history_text}
+    context_block = f"Previous context:\n{history_text}\n" if history_text.strip() else ""
 
-{language_instruction}
+    # Ask for a plain-text answer — no JSON, no formatting
+    explanation_prompt = (
+        f"You are a helpful AI tutor. {lang_rule}\n"
+        f"{context_block}"
+        f"Answer the following question in exactly 2 clear sentences. "
+        f"Do NOT repeat or rephrase the question. "
+        f"Do NOT use bullet points, JSON, or any formatting. "
+        f"Start your answer directly.\n\n"
+        f"Question: {user_input}"
+    )
 
-Return ONLY valid JSON. No text outside JSON. No markdown backticks.
+    last_error  = None
+    explanation = ""
 
-Format:
-{{
-  "explanation": "clear explanation in the REQUIRED language",
-  "summary": "one-sentence summary in the REQUIRED language (max 100 words)",
-  "quiz": [
-    "Question 1 in the REQUIRED language?",
-    "Question 2 in the REQUIRED language?",
-    "Question 3 in the REQUIRED language?"
-  ]
-}}
-
-User Question ({lang.upper()}):
-{user_input}
-"""
-
-    try:
-        response = requests.post(
-            OLLAMA_URL,
-            json={
-                "model": "llama3",
-                "prompt": prompt,
-                "stream": False
-            },
-            timeout=60
-        )
-
-        data = response.json()
-        output = data.get("response", "").strip()
-
-        # Strip markdown fences if model wraps output in ```json
-        if output.startswith("```"):
-            output = output.split("```")[1]
-            if output.startswith("json"):
-                output = output[4:]
-            output = output.strip()
-
+    for attempt in range(2):
         try:
-            parsed = json.loads(output)
-            if "quiz" not in parsed or not isinstance(parsed["quiz"], list):
-                parsed["quiz"] = []
-            parsed["lang"] = lang  # pass detected lang to frontend
-        except Exception:
-            parsed = {
-                "explanation": output,
-                "summary": output[:200],
-                "quiz": [],
-                "lang": lang
-            }
+            explanation = _call(explanation_prompt, max_tokens=180, temperature=0.3)
+            last_error  = None
+            break
+        except requests.Timeout:
+            last_error = "timeout"
+            print(f"⏱ Ollama timeout on attempt {attempt + 1}/2")
+        except requests.RequestException as e:
+            last_error = str(e)
+            print(f"❌ Ollama request error: {e}")
+            break
 
-        return parsed
+    if last_error:
+        msg = (
+            "Ollama is taking too long. Please try again."
+            if last_error == "timeout"
+            else "Could not reach Ollama. Is it running?"
+        )
+        return {"explanation": msg, "summary": "", "quiz": [], "lang": lang}
 
-    except Exception as e:
-        print("Engine Error:", e)
-        return {
-            "explanation": "Error generating response. Please try again.",
-            "summary": "An error occurred.",
-            "quiz": [],
-            "lang": "english"
-        }
+    # Guard: strip any accidental JSON wrapper the model produced
+    if explanation.lstrip().startswith("{"):
+        m = re.search(r'"explanation"\s*:\s*"((?:[^"\\]|\\.)*)"', explanation)
+        explanation = m.group(1).replace('\\"', '"').replace('\\n', ' ') if m else explanation
+
+    # Guard: strip echo of the question if model repeated it
+    q_norm   = re.sub(r'[^\w\s]', '', user_input).strip().lower()
+    ans_norm = re.sub(r'[^\w\s]', '', explanation[:len(user_input) + 15]).strip().lower()
+    if ans_norm.startswith(q_norm[:40]):
+        explanation = explanation[len(user_input):].lstrip(" :-\n")
+
+    explanation = explanation.strip()
+
+    summary = _make_summary(explanation)
+    quiz    = _make_quiz(user_input, explanation, lang)
+
+    print(f"✅ [{lang}] {explanation[:80]}...")
+
+    return {
+        "explanation": explanation,
+        "summary":     summary,
+        "quiz":        quiz,
+        "lang":        lang,
+    }
